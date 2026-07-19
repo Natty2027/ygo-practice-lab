@@ -406,6 +406,7 @@ export default function App() {
         .mdArena::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.5;
           background-image:radial-gradient(3px 3px at 12% 24%,rgba(20,40,16,.7),transparent),radial-gradient(4px 3px at 88% 18%,rgba(22,44,18,.7),transparent),radial-gradient(3px 4px at 8% 78%,rgba(18,38,14,.7),transparent),radial-gradient(4px 4px at 92% 82%,rgba(20,42,16,.7),transparent),radial-gradient(2px 2px at 30% 8%,rgba(160,168,120,.35),transparent),radial-gradient(2px 2px at 66% 92%,rgba(158,166,118,.3),transparent);
           background-size:340px 300px}
+        .mdArena::after{content:"";position:absolute;inset:0;pointer-events:none;border-radius:12px;box-shadow:inset 0 0 120px rgba(0,0,0,.55);background:radial-gradient(120% 80% at 50% 50%, transparent 55%, rgba(0,0,0,.34))}
         .mdField{position:relative;border-radius:10px;padding:14px 18px;
           background:
             repeating-linear-gradient(0deg, rgba(60,66,46,.28) 0 1px, transparent 1px 52px),
@@ -3076,7 +3077,7 @@ function EngineDuel({ main, extra }) {
 
   const row = (arr, { opp = false } = {}) => (
     <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
-      {Array.from({ length: 5 }, (_, i) => <Zone key={i} card={arr[i]} size={70} opp={opp} />)}
+      {Array.from({ length: 5 }, (_, i) => <Zone key={i} card={arr[i]} size={80} opp={opp} />)}
     </div>
   );
   const lastLine = log.length ? log[log.length - 1].replace(/^[•⚠] ?/, "") : "";
@@ -3114,6 +3115,20 @@ function EngineDuel({ main, extra }) {
               <div className="turnhex disp"><span>Turn {turnInfo.n}<br /><span style={{ fontSize: 8, color: "#ffceb0" }}>{turnInfo.phase}</span></span></div>
             </div>
           )}
+
+          {/* phase ribbon — Master Duel / Omega-style step indicator across the top */}
+          {turnInfo.n > 0 && (() => {
+            const seq = ["DP", "SP", "M1", "BP", "M2", "EP"], full = ["Draw", "Standby", "Main 1", "Battle", "Main 2", "End"];
+            const p = turnInfo.phase || "";
+            const idx = /main 2/i.test(p) ? 4 : /battle|damage/i.test(p) ? 3 : /main 1/i.test(p) ? 2 : /standby/i.test(p) ? 1 : /draw/i.test(p) ? 0 : /end/i.test(p) ? 5 : -1;
+            return (
+              <div style={{ position: "absolute", top: 8, left: "50%", transform: "translateX(-50%)", zIndex: 22, display: "flex", gap: 4, background: "rgba(6,8,10,.72)", border: "1px solid rgba(255,255,255,.12)", borderRadius: 20, padding: "4px 8px", boxShadow: "0 2px 10px rgba(0,0,0,.5)" }}>
+                {seq.map((s, i) => (
+                  <span key={s} title={full[i]} className="mono" style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 12, color: i === idx ? "#1a1206" : "#9aa2b1", background: i === idx ? C.gold : "transparent", transition: "all .2s" }}>{s}</span>
+                ))}
+              </div>
+            );
+          })()}
 
           {/* right rail — MD's circular blue buttons: ⓘ toggles the info band, 🗒 the field log */}
           <div style={{ position: "absolute", right: 22, bottom: "20%", zIndex: 20, display: "flex", flexDirection: "column", gap: 10 }}>
