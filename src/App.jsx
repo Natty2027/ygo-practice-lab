@@ -3077,15 +3077,15 @@ function EngineDuel({ main, extra }) {
 
   const row = (arr, { opp = false } = {}) => (
     <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
-      {Array.from({ length: 5 }, (_, i) => <Zone key={i} card={arr[i]} size={80} opp={opp} />)}
+      {Array.from({ length: 5 }, (_, i) => <Zone key={i} card={arr[i]} size={62} opp={opp} />)}
     </div>
   );
   const lastLine = log.length ? log[log.length - 1].replace(/^[•⚠] ?/, "") : "";
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", height: "calc(100vh - 60px)" }}>
-      <div style={{ padding: 14, display: "flex", flexDirection: "column", justifyContent: "center", overflow: "auto", background: "#0b0d10" }}>
-        <div className={"mdArena" + (shaking ? " shake" : "")} style={{ maxWidth: 980, width: "100%", margin: "0 auto", padding: "42px 56px 36px" }}>
+      <div style={{ padding: 10, display: "flex", flexDirection: "column", justifyContent: "flex-start", overflow: "auto", minHeight: 0, background: "#0b0d10" }}>
+        <div className={"mdArena" + (shaking ? " shake" : "")} style={{ maxWidth: 980, width: "100%", margin: "0 auto", padding: "16px 44px 18px" }}>
           {flare && <div key={flare.n} className={"flarelayer " + (flare.kind === "red" ? "flare-red" : "flare-gold")} />}
 
           {/* floating damage number — appears on the side that took the hit */}
@@ -3149,9 +3149,9 @@ function EngineDuel({ main, extra }) {
           {turnFlash > 0 && turnInfo.n > 1 && <div key={turnFlash} className="turnchange"><span>Turn Change</span></div>}
 
           {b && (
-            <div className="mdField" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div className="mdField" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {/* opponent hand — a fanned spread of card-backs, like a real hand held across the table */}
-              <div style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", minHeight: 54, perspective: 500 }}>
+              <div style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", minHeight: 34, perspective: 500 }}>
                 <div style={{ display: "flex", justifyContent: "center" }}>
                   {(() => {
                     const cnt = b.opp.hand.length, mid = (cnt - 1) / 2;
@@ -3191,8 +3191,8 @@ function EngineDuel({ main, extra }) {
                 <span>P2 · deck {b.opp.deck} · GY {b.opp.grave} · extra {b.opp.extra}</span>
               </div>
               {/* your hand — face-up along your edge */}
-              <div style={{ display: "flex", gap: 6, justifyContent: "center", flexWrap: "nowrap", overflowX: "auto", minHeight: 118, padding: "6px 2px 2px", alignItems: "flex-end" }}>
-                {b.me.hand.map((c, i) => <Zone key={i} card={c} hand size={76} />)}
+              <div style={{ display: "flex", gap: 6, justifyContent: "center", flexWrap: "nowrap", overflowX: "auto", minHeight: 92, padding: "4px 2px 2px", alignItems: "flex-end" }}>
+                {b.me.hand.map((c, i) => <Zone key={i} card={c} hand size={64} />)}
                 {b.me.hand.length === 0 && <span className="mono" style={{ fontSize: 11, color: "rgba(40,44,26,.8)", alignSelf: "center" }}>empty hand</span>}
               </div>
             </div>
