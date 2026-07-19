@@ -585,6 +585,7 @@ function Editor({ main, extra, side, setMain, setExtra, setSide, addCard, remove
   const [mdOnly, setMdOnly] = useState(true);    // restrict pool to the Master Duel card set
   const [set, setSet] = useState("");            // browse a specific printed set (e.g. Chaos Origins)
   const [preview, setPreview] = useState(null);
+  const [pinned, setPinned] = useState(false);   // keep a card in the inspector while browsing
   const [savedNames, setSavedNames] = useState([]);
   const debounce = useRef(null);
   const fileRef = useRef(null);
@@ -672,13 +673,20 @@ function Editor({ main, extra, side, setMain, setExtra, setSide, addCard, remove
     flash(`Loaded ${name}`);
   };
 
-  const hover = (c) => setPreview(c);
+  const hover = (c) => { if (!pinned) setPreview(c); };
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "272px minmax(0,1fr) minmax(300px,.92fr)", height: "calc(100vh - 60px)", background: MD.bg }}>
       {/* ---- left: full card inspector (Master Duel style) ---- */}
       <aside style={{ borderRight: `1px solid ${MD.line}`, padding: 14, overflowY: "auto", background: `linear-gradient(180deg, ${MD.panel}, ${MD.bg})` }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
+          <button onClick={() => setPinned((p) => !p)} title="Pin keeps this card in view while you browse the pool"
+            style={{ background: pinned ? "rgba(232,184,75,.16)" : "transparent", border: `1px solid ${pinned ? MD.gold : MD.line}`, color: pinned ? MD.gold : C.mute, borderRadius: 6, padding: "3px 9px", fontSize: 10.5 }}>
+            {pinned ? "📌 Pinned" : "📌 Pin"}
+          </button>
+        </div>
         <CardInspector card={preview} />
+        <DeckAnalysis main={main} extra={extra} side={side} />
       </aside>
 
       {/* ---- centre: the deck being built ---- */}
@@ -759,7 +767,7 @@ function Editor({ main, extra, side, setMain, setExtra, setSide, addCard, remove
               <CardTile key={c.id + c.name} card={c}
                 badge={countOf(main, c.name) + countOf(extra, c.name) + countOf(side, c.name)}
                 onClick={() => addCard(c, dest === "side" ? "side" : undefined)}
-                onHover={() => setPreview(c)} />
+                onHover={() => hover(c)} />
             ))}
           </div>
         </div>
@@ -809,6 +817,74 @@ function CardInspector({ card }) {
         </div>
       )}
       <div style={{ fontSize: 11.5, color: "#c8cee0", marginTop: 10, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{card.desc}</div>
+    </div>
+  );
+}
+
+/* live deck analysis — the kind of at-a-glance breakdown a deck-testing tool
+   should have: monster/spell/trap split, level-rank curve, attributes, legality */
+function DeckAnalysis({ main, extra, side }) {
+  const s = useMemo(() => {
+    const kind = (c) => frameKey(c.frameType);
+    const isST = (c) => kind(c) === "spell" || kind(c) === "trap";
+    const monsters = main.filter((c) => !isST(c));
+    const levels = {}, attrs = {};
+    monsters.forEach((c) => {
+      const l = c.level ?? 0; if (l) levels[l] = (levels[l] || 0) + 1;
+      if (c.attribute) attrs[c.attribute] = (attrs[c.attribute] || 0) + 1;
+    });
+    return {
+      monsters: monsters.length,
+      spells: main.filter((c) => kind(c) === "spell").length,
+      traps: main.filter((c) => kind(c) === "trap").length,
+      levels, attrs,
+    };
+  }, [main]);
+  const mainOK = main.length >= 40 && main.length <= 60;
+  const legal = mainOK && extra.length <= 15 && side.length <= 15;
+  const maxLv = Math.max(1, ...Object.values(s.levels));
+  const row = (label, val, tone) => (
+    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5 }}>
+      <span style={{ color: C.mute }}>{label}</span>
+      <span style={{ color: tone || C.text, fontWeight: 700 }}>{val}</span>
+    </div>
+  );
+  return (
+    <div style={{ marginTop: 18, borderTop: `1px solid ${MD.line}`, paddingTop: 14 }}>
+      <div className="disp" style={{ fontSize: 11, color: MD.gold, marginBottom: 8 }}>Deck Analysis</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 8 }}>
+        {row("Monsters", s.monsters, "#e0a94a")}
+        {row("Spells", s.spells, "#2fa6a0")}
+        {row("Traps", s.traps, "#c05aa0")}
+        {row("Main / Extra / Side", `${main.length} / ${extra.length} / ${side.length}`)}
+      </div>
+      <div className="mono" style={{ fontSize: 10.5, color: legal ? C.good : C.bad, marginBottom: 10 }}>
+        {legal ? "✓ Legal deck sizes" : `⚠ ${!mainOK ? `Main ${main.length} (need 40–60)` : extra.length > 15 ? "Extra Deck > 15" : "Side Deck > 15"}`}
+      </div>
+      {Object.keys(s.levels).length > 0 && (
+        <div style={{ marginBottom: 10 }}>
+          <div className="mono" style={{ fontSize: 9.5, color: C.mute, marginBottom: 4, letterSpacing: ".08em" }}>LEVEL / RANK CURVE</div>
+          {Object.keys(s.levels).map(Number).sort((a, b) => a - b).map((lv) => (
+            <div key={lv} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+              <span className="mono" style={{ fontSize: 10, color: C.mute, width: 18, textAlign: "right" }}>{lv}</span>
+              <div style={{ flex: 1, height: 9, background: MD.panel2, borderRadius: 3, overflow: "hidden" }}>
+                <div style={{ width: `${(s.levels[lv] / maxLv) * 100}%`, height: "100%", background: MD.gold, transition: "width .3s" }} />
+              </div>
+              <span className="mono" style={{ fontSize: 10, color: C.text, width: 14 }}>{s.levels[lv]}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {Object.keys(s.attrs).length > 0 && (
+        <div>
+          <div className="mono" style={{ fontSize: 9.5, color: C.mute, marginBottom: 4, letterSpacing: ".08em" }}>ATTRIBUTES</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+            {Object.entries(s.attrs).sort((a, b) => b[1] - a[1]).map(([a, n]) => (
+              <span key={a} className="mono" style={{ fontSize: 10, color: C.text, background: MD.panel2, border: `1px solid ${MD.line}`, borderRadius: 4, padding: "2px 6px" }}>{a} {n}</span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
