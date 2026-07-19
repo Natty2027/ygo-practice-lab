@@ -2521,6 +2521,7 @@ function EngineDuel({ main, extra }) {
   const [board, setBoard] = useState(null);
   const [prompt, setPrompt] = useState(null);
   const [pick, setPick] = useState([]);          // multi-select buffer for SELECT_CARD
+  const [placeSel, setPlaceSel] = useState([]);  // chosen zones for SELECT_PLACE
   const [log, setLog] = useState([]);
   const [diag, setDiag] = useState(false);
   const [flare, setFlare] = useState(null); // {kind,n} reactive arena flash
@@ -2676,12 +2677,50 @@ function EngineDuel({ main, extra }) {
     for (let seq = 0; seq < 5 && out.length < (n || m.count); seq++) if (!(m.field_mask & (1 << (8 + seq)))) out.push({ player: m.player, location: L.SZONE, sequence: seq });
     return out.length ? out : [{ player: m.player, location: L.MZONE, sequence: 0 }];
   };
+  // human-readable title + instruction for the current decision — so it's always
+  // clear WHAT you're being asked to do (target, tribute, zone, respond, …).
+  const promptMeta = (p) => {
+    const MT = mod.current.OcgMessageType;
+    switch (p.type) {
+      case MT.SELECT_IDLECMD: return { title: "Main Phase — your move", hint: "Summon or set a monster, set/activate a Spell or Trap, or end your turn." };
+      case MT.SELECT_BATTLECMD: return { title: "Battle Phase", hint: "Declare an attack, or advance to Main Phase 2 / End Turn." };
+      case MT.SELECT_CHAIN: return { title: p.forced ? "Mandatory response" : "Response window", hint: p.forced ? "You must activate one of these effects." : "You may chain an effect in response — or pass." };
+      case MT.SELECT_EFFECTYN: return { title: "Activate this effect?", hint: "Choose whether to apply the card's optional effect." };
+      case MT.SELECT_YESNO: return { title: "Yes or No", hint: "Answer the card's question." };
+      case MT.SELECT_OPTION: return { title: "Choose an effect", hint: "This card offers more than one effect — pick which to use." };
+      case MT.SELECT_CARD: return { title: "Select target(s)", hint: `Pick ${p.min}${p.max > p.min ? `–${p.max}` : ""} card${p.max > 1 ? "s" : ""}. These are your targets or the cards to act on.` };
+      case MT.SELECT_TRIBUTE: return { title: "Select tribute(s)", hint: `Choose ${p.min}${p.max > p.min ? `–${p.max}` : ""} monster(s) to Tribute.` };
+      case MT.SELECT_POSITION: return { title: "Battle position", hint: "Choose the position to place this card." };
+      case MT.SELECT_PLACE: case MT.SELECT_DISFIELD: return { title: "Choose a zone", hint: `Pick where to place ${(p.count || 1) > 1 ? `${p.count} cards` : "the card"}.` };
+      default: return { title: "Your decision", hint: "" };
+    }
+  };
+  const isPlace = (p) => { const MT = mod.current.OcgMessageType; return p && (p.type === MT.SELECT_PLACE || p.type === MT.SELECT_DISFIELD); };
+  const availablePlaces = (m) => {
+    const L = mod.current.OcgLocation, out = [];
+    for (let seq = 0; seq < 7; seq++) if (!(m.field_mask & (1 << seq))) out.push({ player: m.player, location: L.MZONE, sequence: seq, label: seq < 5 ? `Monster ${seq + 1}` : `Extra Monster ${seq - 4}` });
+    for (let seq = 0; seq < 5; seq++) if (!(m.field_mask & (1 << (8 + seq)))) out.push({ player: m.player, location: L.SZONE, sequence: seq, label: `Spell/Trap ${seq + 1}` });
+    return out;
+  };
+  const confirmPlace = () => {
+    const MT = mod.current.OcgMessageType, RT = mod.current.OcgResponseType;
+    const places = placeSel.length ? placeSel : firstPlaces(prompt);
+    respond({ type: prompt.type === MT.SELECT_DISFIELD ? RT.SELECT_DISFIELD : RT.SELECT_PLACE, places });
+  };
+  // guaranteed-safe escape hatch: let the engine resolve the current prompt the
+  // old automatic way (used if a manual selection isn't behaving as expected).
+  const autoResolveCurrent = () => {
+    const m = mod.current;
+    respond(autoResponse(prompt, m.OcgResponseType, m.SelectIdleCMDAction, m.SelectBattleCMDAction, m.OcgMessageType));
+  };
 
   const drive = async () => {
     const c = core.current, h = handle.current, m = mod.current;
     const MT = m.OcgMessageType, PR = m.OcgProcessResult, RT = m.OcgResponseType, IA = m.SelectIdleCMDAction, BA = m.SelectBattleCMDAction;
     // selections we resolve automatically for the human (no meaningful choice / no UI yet)
-    const AUTO = [MT.SELECT_PLACE, MT.SELECT_SUM, MT.SELECT_UNSELECT_CARD, MT.SELECT_COUNTER, MT.SELECT_DISFIELD];
+    // zone placement is now a real player choice (see the SELECT_PLACE picker);
+    // SUM/COUNTER/UNSELECT stay auto for now but are logged transparently below.
+    const AUTO = [MT.SELECT_SUM, MT.SELECT_UNSELECT_CARD, MT.SELECT_COUNTER];
     const PHNAME = { 0x01: "Draw", 0x02: "Standby", 0x04: "Main 1", 0x08: "Battle Start", 0x10: "Battle Step", 0x20: "Damage", 0x40: "Damage Calc", 0x80: "Battle", 0x100: "Main 2", 0x200: "End" };
     let guard = 0, autoStreak = 0;
     while (guard++ < 8000) {
@@ -2711,9 +2750,9 @@ function EngineDuel({ main, extra }) {
         const sel = [...msgs].reverse().find((x) => isSelect(x, MT)) || lastSel.current;
         if (!sel) { logLine("⚠ engine is waiting but no selection request was seen — stopping"); return; }
         if (sel.player !== 0) { c.duelSetResponse(h, oppResponse(sel, RT, IA, BA, MT)); lastSel.current = null; if (++autoStreak > 600) { logLine("⚠ opponent stalled — stopping"); return; } await sleep(260); continue; } // AI opponent, paced
-        if (AUTO.includes(sel.type)) { c.duelSetResponse(h, autoResponse(sel, RT, IA, BA, MT)); lastSel.current = null; if (++autoStreak > 600) { logLine("⚠ engine stalled on a selection — stopping"); return; } continue; }
+        if (AUTO.includes(sel.type)) { logLine("⚙ auto-resolved for you: " + (((m.ocgMessageTypeStrings?.get?.(sel.type)) || ("msg#" + sel.type)).toLowerCase().replace(/select_/, "").replace(/_/g, " ")) + " (cost / selection handled automatically)"); c.duelSetResponse(h, autoResponse(sel, RT, IA, BA, MT)); lastSel.current = null; if (++autoStreak > 600) { logLine("⚠ engine stalled on a selection — stopping"); return; } continue; }
         autoStreak = 0;
-        setPick([]); setPrompt(sel); return; // a real decision → hand off to the human
+        setPick([]); setPlaceSel([]); setPrompt(sel); return; // a real decision → hand off to the human
       }
       autoStreak = 0;
       if (shown) await sleep(summonCode ? 900 : 150); // let animations / the summon spotlight breathe
@@ -2723,7 +2762,7 @@ function EngineDuel({ main, extra }) {
   };
 
   const respond = (resp) => {
-    try { core.current.duelSetResponse(handle.current, resp); lastSel.current = null; setPrompt(null); setPick([]); drive(); }
+    try { core.current.duelSetResponse(handle.current, resp); lastSel.current = null; setPrompt(null); setPick([]); setPlaceSel([]); drive(); }
     catch (e) { setErr(String(e?.message || e)); setStatus("error"); }
   };
 
@@ -3138,9 +3177,18 @@ function EngineDuel({ main, extra }) {
       {/* right: prompt + log */}
       <div style={{ borderLeft: `1px solid ${C.line}`, display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ padding: 12, borderBottom: `1px solid ${C.line}`, minHeight: 180 }}>
-          <div className="disp" style={{ fontSize: 11, color: C.gold, marginBottom: 8 }}>
-            {status === "ended" ? "Duel over" : prompt ? "Your decision" : "Engine resolving…"}
-          </div>
+          {(() => {
+            const meta = prompt ? promptMeta(prompt) : null;
+            return (
+              <div style={{ marginBottom: 10 }}>
+                <div className="disp" style={{ fontSize: 12.5, color: prompt ? C.gold : C.mute, letterSpacing: ".05em" }}>
+                  {status === "ended" ? "Duel over" : meta ? `▶ ${meta.title}` : "Engine resolving…"}
+                </div>
+                {meta && meta.hint && <div className="mono" style={{ fontSize: 11, color: C.text, marginTop: 5, lineHeight: 1.45, opacity: .85 }}>{meta.hint}</div>}
+                {!prompt && status !== "ended" && <div className="mono" style={{ fontSize: 10.5, color: C.mute, marginTop: 4 }}>Resolving effects — no input needed.</div>}
+              </div>
+            );
+          })()}
           {status === "ended" && <button onClick={start} className="disp" style={{ ...btn(), background: C.gold, color: "#1a1206", border: "none" }}>New duel</button>}
           {prompt && isMultiSel(prompt) && (
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
@@ -3159,9 +3207,34 @@ function EngineDuel({ main, extra }) {
                 Confirm ({pick.length})
               </button>
               {prompt.can_cancel && <button onClick={() => confirmSelect(true)} style={{ ...btn(), color: C.bad, borderColor: C.bad }}>Cancel</button>}
+              <button onClick={autoResolveCurrent} style={{ ...btn(), color: C.mute, fontSize: 11 }}>⚡ Let the engine choose</button>
             </div>
           )}
-          {prompt && !isMultiSel(prompt) && (
+          {prompt && isPlace(prompt) && (() => {
+            const places = availablePlaces(prompt);
+            const need = prompt.count || 1;
+            return (
+              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5 }}>
+                  {places.map((pl, i) => {
+                    const on = placeSel.some((x) => x.location === pl.location && x.sequence === pl.sequence);
+                    return (
+                      <button key={i} onClick={() => setPlaceSel((s) => on ? s.filter((x) => !(x.location === pl.location && x.sequence === pl.sequence)) : (need === 1 ? [{ player: pl.player, location: pl.location, sequence: pl.sequence }] : (s.length < need ? [...s, { player: pl.player, location: pl.location, sequence: pl.sequence }] : s)))}
+                        style={{ textAlign: "left", background: on ? "rgba(232,184,75,.15)" : C.panel2, border: `1px solid ${on ? C.gold : C.line}`, color: on ? C.gold : C.text, borderRadius: 6, padding: "7px 9px", fontSize: 11.5 }}>
+                        {on ? "✓ " : ""}{pl.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button disabled={placeSel.length !== need} onClick={confirmPlace}
+                  style={{ ...btn(), marginTop: 4, background: placeSel.length === need ? C.good : C.panel2, color: placeSel.length === need ? "#07120b" : C.mute, border: "none" }}>
+                  Confirm zone{need > 1 ? ` (${placeSel.length}/${need})` : ""}
+                </button>
+                <button onClick={autoResolveCurrent} style={{ ...btn(), color: C.mute, fontSize: 11 }}>⚡ Let the engine pick a zone</button>
+              </div>
+            );
+          })()}
+          {prompt && !isMultiSel(prompt) && !isPlace(prompt) && (
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
               {btns.length === 0 && <p className="mono" style={{ fontSize: 11, color: C.mute }}>(no options — the engine may be mid-resolution)</p>}
               {btns.map((x, i) => (
