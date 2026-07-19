@@ -37,6 +37,10 @@ const ZONE = { mon: "#d8a13a", st: "#2fa6a0", emz: "#8a6bff", field: "#3fa96a", 
    nothing to host or license — everything is synthesised at runtime. */
 const Sound = {
   ctx: null, master: null, sfxOn: true, musicOn: false, musicTimer: null, step: 0,
+  // real CC0 sound files (Kenney) — decoded once; sfx() uses them when present
+  // and falls back to the synthesised tones below if a file is missing.
+  sfxBuf: {},
+  sfxFiles: { click: "./audio/sfx/click.ogg", draw: "./audio/sfx/draw.ogg", summon: "./audio/sfx/summon.ogg", phase: "./audio/sfx/phase.ogg" },
   init() {
     if (this.ctx) return;
     try {
@@ -45,7 +49,25 @@ const Sound = {
       this.master = this.ctx.createGain();
       this.master.gain.value = 0.5;
       this.master.connect(this.ctx.destination);
+      this.loadSfx();
     } catch { /* no audio */ }
+  },
+  async loadSfx() {
+    if (!this.ctx) return;
+    for (const k in this.sfxFiles) {
+      if (this.sfxBuf[k]) continue;
+      try {
+        const r = await fetch(this.sfxFiles[k]);
+        if (!r.ok) continue;
+        this.sfxBuf[k] = await this.ctx.decodeAudioData(await r.arrayBuffer());
+      } catch { /* keep synth fallback for this kind */ }
+    }
+  },
+  playBuf(buf, vol = 0.6) {
+    if (!this.ctx || !buf) return;
+    const src = this.ctx.createBufferSource(); src.buffer = buf;
+    const g = this.ctx.createGain(); g.gain.value = vol;
+    src.connect(g); g.connect(this.master); src.start();
   },
   resume() { try { this.ctx?.resume?.(); } catch {} },
   tone(freq, dur = 0.12, type = "sine", vol = 0.3, when = 0, dest = null) {
@@ -71,6 +93,7 @@ const Sound = {
   sfx(kind) {
     if (!this.ctx || !this.sfxOn) return;
     this.resume();
+    if (this.sfxBuf[kind]) { this.playBuf(this.sfxBuf[kind]); return; } // real file when available
     switch (kind) {
       case "click": this.tone(430, 0.05, "triangle", 0.14); break;
       case "draw": this.tone(620, 0.07, "sine", 0.18); this.tone(880, 0.08, "sine", 0.13, 0.05); break;
