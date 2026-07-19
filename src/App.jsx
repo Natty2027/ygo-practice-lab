@@ -331,12 +331,19 @@ export default function App() {
     <div style={{ background: C.bg, color: C.text, minHeight: "100vh", fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
       <style>{`
         *{box-sizing:border-box}
+        html{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
         ::-webkit-scrollbar{width:9px;height:9px}
         ::-webkit-scrollbar-thumb{background:${C.line};border-radius:9px}
         ::-webkit-scrollbar-track{background:transparent}
         .mono{font-family:ui-monospace,'SF Mono',Menlo,monospace}
         .disp{font-family:'Oswald',ui-sans-serif,system-ui,sans-serif;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
-        button{cursor:pointer;font-family:inherit}
+        button{cursor:pointer;font-family:inherit;transition:filter .12s ease, transform .06s ease, box-shadow .15s ease, background .15s ease, border-color .15s ease}
+        button:not(:disabled):hover{filter:brightness(1.09)}
+        button:not(:disabled):active{transform:translateY(1px)}
+        button:disabled{cursor:default;opacity:.55}
+        :focus-visible{outline:2px solid rgba(232,184,75,.8);outline-offset:2px}
+        select,input{transition:border-color .15s ease, box-shadow .15s ease}
+        select:focus,input:focus{border-color:#e8b84b;box-shadow:0 0 0 3px rgba(232,184,75,.16)}
         .cardimg{transition:transform .12s ease, box-shadow .12s ease}
         .cardimg:hover{transform:translateY(-3px);box-shadow:0 6px 18px rgba(0,0,0,.55)}
         input,select{font-family:inherit}
