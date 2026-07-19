@@ -2643,7 +2643,18 @@ function EngineDuel({ main, extra }) {
     setBoard({ me: side(0), opp: side(1) });
   };
 
-  const isSelect = (m, MT) => [MT.SELECT_BATTLECMD, MT.SELECT_IDLECMD, MT.SELECT_EFFECTYN, MT.SELECT_YESNO, MT.SELECT_OPTION, MT.SELECT_CARD, MT.SELECT_CHAIN, MT.SELECT_PLACE, MT.SELECT_POSITION, MT.SELECT_TRIBUTE, MT.SELECT_SUM, MT.SELECT_UNSELECT_CARD].includes(m.type);
+  // Every awaitable query the core can stop on. Authoritative source: the
+  // OcgResponseType enum in @jsr/n1xx1__ocgcore-wasm (1:1 with MSG_* in
+  // edo9300/ygopro-core common.h). If a type is missing here, drive() can't see
+  // the pending decision when duelProcess returns AWAITING and the duel freezes
+  // mid-resolution (that was BUG 1). Keep this list complete.
+  const isSelect = (m, MT) => [
+    MT.SELECT_BATTLECMD, MT.SELECT_IDLECMD, MT.SELECT_EFFECTYN, MT.SELECT_YESNO, MT.SELECT_OPTION,
+    MT.SELECT_CARD, MT.SELECT_CARD_CODES, MT.SELECT_UNSELECT_CARD, MT.SELECT_CHAIN, MT.SELECT_DISFIELD,
+    MT.SELECT_PLACE, MT.SELECT_POSITION, MT.SELECT_TRIBUTE, MT.SELECT_COUNTER, MT.SELECT_SUM,
+    MT.SORT_CARD, MT.SORT_CHAIN, MT.ANNOUNCE_RACE, MT.ANNOUNCE_ATTRIB, MT.ANNOUNCE_CARD,
+    MT.ANNOUNCE_NUMBER, MT.ROCK_PAPER_SCISSORS,
+  ].includes(m.type);
 
   // minimal auto-resolution (used for the human's complex selects we don't
   // have a UI for yet, so the game never deadlocks)
@@ -2661,6 +2672,14 @@ function EngineDuel({ main, extra }) {
       case MT.SELECT_UNSELECT_CARD: return { type: RT.SELECT_UNSELECT_CARD, index: 0 };
       case MT.SELECT_POSITION: return { type: RT.SELECT_POSITION, position: firstPos(m.positions) };
       case MT.SELECT_PLACE: case MT.SELECT_DISFIELD: return { type: m.type === MT.SELECT_DISFIELD ? RT.SELECT_DISFIELD : RT.SELECT_PLACE, places: firstPlaces(m, 1) };
+      case MT.SELECT_COUNTER: { let need = m.count || 0; const counters = (m.cards || []).map((cc) => { const take = Math.min(need, cc.count || 0); need -= take; return take; }); return { type: RT.SELECT_COUNTER, counters }; }
+      case MT.SELECT_CARD_CODES: return { type: RT.SELECT_CARD_CODES, codes: (m.selects || []).slice(0, Math.max(1, m.min || 1)).map((cc) => cc.code) };
+      case MT.SORT_CARD: case MT.SORT_CHAIN: return { type: RT.SORT_CARD, order: null };
+      case MT.ANNOUNCE_RACE: return { type: RT.ANNOUNCE_RACE, races: firstBits(m.available, m.count) };
+      case MT.ANNOUNCE_ATTRIB: return { type: RT.ANNOUNCE_ATTRIB, attributes: firstBits(m.available, m.count) };
+      case MT.ANNOUNCE_NUMBER: return { type: RT.ANNOUNCE_NUMBER, value: 0 };
+      case MT.ANNOUNCE_CARD: return { type: RT.ANNOUNCE_CARD, card: 0 };
+      case MT.ROCK_PAPER_SCISSORS: return { type: RT.ROCK_PAPER_SCISSORS, value: 1 };
       default: return { type: RT.SELECT_YESNO, yes: false };
     }
   };
@@ -2695,6 +2714,11 @@ function EngineDuel({ main, extra }) {
     respond({ type: rt, indicies: cancel ? null : pick });
   };
   const firstPos = (mask) => [1, 4, 2, 8].find((p) => mask & p) || 1;
+  const firstBits = (mask, n) => {
+    const out = []; const mm = BigInt(mask ?? 0);
+    for (let i = 0n; i < 64n && out.length < (n || 1); i++) { const bit = 1n << i; if (mm & bit) out.push(Number(bit)); }
+    return out.length ? out : [1];
+  };
   const firstPlaces = (m, n) => {
     const L = mod.current.OcgLocation, out = [];
     for (let seq = 0; seq < 7 && out.length < (n || m.count); seq++) if (!(m.field_mask & (1 << seq))) out.push({ player: m.player, location: L.MZONE, sequence: seq });
@@ -2742,9 +2766,12 @@ function EngineDuel({ main, extra }) {
     const c = core.current, h = handle.current, m = mod.current;
     const MT = m.OcgMessageType, PR = m.OcgProcessResult, RT = m.OcgResponseType, IA = m.SelectIdleCMDAction, BA = m.SelectBattleCMDAction;
     // selections we resolve automatically for the human (no meaningful choice / no UI yet)
-    // zone placement is now a real player choice (see the SELECT_PLACE picker);
-    // SUM/COUNTER/UNSELECT stay auto for now but are logged transparently below.
-    const AUTO = [MT.SELECT_SUM, MT.SELECT_UNSELECT_CARD, MT.SELECT_COUNTER];
+    const AUTO = [
+      MT.SELECT_SUM, MT.SELECT_UNSELECT_CARD, MT.SELECT_COUNTER, MT.SELECT_CARD_CODES,
+      MT.SELECT_DISFIELD, MT.SORT_CARD, MT.SORT_CHAIN,
+      MT.ANNOUNCE_RACE, MT.ANNOUNCE_ATTRIB, MT.ANNOUNCE_CARD, MT.ANNOUNCE_NUMBER,
+      MT.ROCK_PAPER_SCISSORS,
+    ];
     const PHNAME = { 0x01: "Draw", 0x02: "Standby", 0x04: "Main 1", 0x08: "Battle Start", 0x10: "Battle Step", 0x20: "Damage", 0x40: "Damage Calc", 0x80: "Battle", 0x100: "Main 2", 0x200: "End" };
     let guard = 0, autoStreak = 0;
     while (guard++ < 8000) {
@@ -2772,7 +2799,13 @@ function EngineDuel({ main, extra }) {
       if (st === PR.END) { setStatus("ended"); setPrompt(null); return; }
       if (st === PR.WAITING) {
         const sel = [...msgs].reverse().find((x) => isSelect(x, MT)) || lastSel.current;
-        if (!sel) { logLine("⚠ engine is waiting but no selection request was seen — stopping"); return; }
+        if (!sel) {
+          const fallback = msgs.length ? msgs[msgs.length - 1] : null;
+          logLine("⚠ unrecognized engine query — auto-passing to keep the duel going");
+          try { c.duelSetResponse(h, fallback ? autoResponse(fallback, RT, IA, BA, MT) : { type: RT.SELECT_YESNO, yes: false }); } catch { c.duelSetResponse(h, { type: RT.SELECT_YESNO, yes: false }); }
+          if (++autoStreak > 600) { logLine("⚠ engine stalled — stopping"); return; }
+          continue;
+        }
         if (sel.player !== 0) { c.duelSetResponse(h, oppResponse(sel, RT, IA, BA, MT)); lastSel.current = null; if (++autoStreak > 600) { logLine("⚠ opponent stalled — stopping"); return; } await sleep(260); continue; } // AI opponent, paced
         if (AUTO.includes(sel.type)) { logLine("⚙ auto-resolved for you: " + (((m.ocgMessageTypeStrings?.get?.(sel.type)) || ("msg#" + sel.type)).toLowerCase().replace(/select_/, "").replace(/_/g, " ")) + " (cost / selection handled automatically)"); c.duelSetResponse(h, autoResponse(sel, RT, IA, BA, MT)); lastSel.current = null; if (++autoStreak > 600) { logLine("⚠ engine stalled on a selection — stopping"); return; } continue; }
         autoStreak = 0;
