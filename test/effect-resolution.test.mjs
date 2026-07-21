@@ -13,9 +13,13 @@ const AWAITABLE = [
   'SELECT_PLACE','SELECT_POSITION','SELECT_TRIBUTE','SELECT_COUNTER','SELECT_SUM',
   'SORT_CARD','ANNOUNCE_RACE','ANNOUNCE_ATTRIB','ANNOUNCE_CARD','ANNOUNCE_NUMBER','ROCK_PAPER_SCISSORS',
 ];
-// Types handled by interactive UI paths rather than autoResponse.
+// Types handled by interactive UI paths rather than autoResponse. Every awaitable
+// query now has a real player-facing prompt; autoResponse remains only as the
+// "⚡ Let the engine choose" escape hatch + the AI opponent's fallback.
 const INTERACTIVE = ['SELECT_IDLECMD','SELECT_BATTLECMD','SELECT_CHAIN','SELECT_EFFECTYN',
-  'SELECT_YESNO','SELECT_OPTION','SELECT_POSITION','SELECT_CARD','SELECT_TRIBUTE','SELECT_PLACE','SELECT_DISFIELD'];
+  'SELECT_YESNO','SELECT_OPTION','SELECT_POSITION','SELECT_CARD','SELECT_TRIBUTE','SELECT_PLACE','SELECT_DISFIELD',
+  'SELECT_UNSELECT_CARD','SELECT_SUM','SELECT_COUNTER','SORT_CARD','ANNOUNCE_RACE','ANNOUNCE_ATTRIB',
+  'ANNOUNCE_CARD','ANNOUNCE_NUMBER','ROCK_PAPER_SCISSORS'];
 
 const file = process.argv[2] || new URL('../src/App.jsx', import.meta.url).pathname;
 const src = fs.readFileSync(file, 'utf8');

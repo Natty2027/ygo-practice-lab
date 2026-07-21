@@ -2561,6 +2561,8 @@ function EngineDuel({ main, extra }) {
   const [oppChoice, setOppChoice] = useState("Legendary Beatdown"); // opponent deck
   const [oppNames, setOppNames] = useState([]);        // your saved decks, usable as the opponent
   const [dmgFloat, setDmgFloat] = useState(null);      // floating damage number {n,amt,who}
+  const [promptId, setPromptId] = useState(0);         // bumps on every new prompt → remounts <ComplexPrompt> with fresh local state
+  const [cardMenu, setCardMenu] = useState(null);      // {code, actions:[{label,resp,tone}]} floating action menu when a clicked card has >1 action
   useEffect(() => { (async () => setOppNames((await store.get("deck_index")) || []))(); }, []);
   // Resolve the chosen opponent deck into {main,extra} card-lists (or null = mirror your deck)
   const buildOppDeck = async () => {
@@ -2630,13 +2632,16 @@ function EngineDuel({ main, extra }) {
     const side = (t) => {
       const mz = loc(t, L.MZONE);   // 7 slots: 0–4 main monster zones, 5–6 the shared EMZs
       const sz = loc(t, L.SZONE);   // 8 slots: 0–4 S/T, 5 field spell, 6–7 pendulum
+      // tag each card with its (controller, location, sequence) so a click on the
+      // board can be matched back to the engine's summon/attack/target lists.
+      const tag = (card, location, sequence) => (card ? { ...card, __loc: { controller: t, location, sequence } } : null);
       return {
         lp: lp[t],
-        mon: [0, 1, 2, 3, 4].map((i) => mz[i] || null),   // keep empty slots → cards stay in their real zones
-        emz: [mz[5] || null, mz[6] || null],
-        st: [0, 1, 2, 3, 4].map((i) => sz[i] || null),
-        fieldZone: sz[5] || null,
-        hand: loc(t, L.HAND).filter(Boolean),
+        mon: [0, 1, 2, 3, 4].map((i) => tag(mz[i], L.MZONE, i)),   // keep empty slots → cards stay in their real zones
+        emz: [tag(mz[5], L.MZONE, 5), tag(mz[6], L.MZONE, 6)],
+        st: [0, 1, 2, 3, 4].map((i) => tag(sz[i], L.SZONE, i)),
+        fieldZone: tag(sz[5], L.SZONE, 5),
+        hand: loc(t, L.HAND).map((cd, i) => tag(cd, L.HAND, i)).filter(Boolean),
         grave: c.duelQueryCount(h, t, L.GRAVE), deck: c.duelQueryCount(h, t, L.DECK), extra: c.duelQueryCount(h, t, L.EXTRA),
       };
     };
@@ -2685,19 +2690,30 @@ function EngineDuel({ main, extra }) {
   };
   // the AI opponent (Player 2): plays its OWN line — varied, not a mirror.
   const rnd = (n) => Math.floor(Math.random() * n);
+  // ATK of a card by passcode (0 if none) — lets the AI value its options
+  const atkOf = (code) => cardObjFromCode(code)?.atk || 0;
+  const strongestIdx = (arr) => { let bi = 0, ba = -Infinity; (arr || []).forEach((c, i) => { const a = atkOf(c.code); if (a > ba) { ba = a; bi = i; } }); return bi; };
   const oppResponse = (m, RT, IA, BA, MT) => {
     switch (m.type) {
       case MT.SELECT_IDLECMD: {
-        // occasionally set a monster or backrow instead of always summoning the first card
-        if (m.summons?.length && Math.random() < 0.75) return { type: RT.SELECT_IDLECMD, action: IA.SELECT_SUMMON, index: rnd(m.summons.length) };
-        if (m.monster_sets?.length && Math.random() < 0.5) return { type: RT.SELECT_IDLECMD, action: IA.SELECT_MONSTER_SET, index: rnd(m.monster_sets.length) };
-        if (m.spell_sets?.length && Math.random() < 0.6) return { type: RT.SELECT_IDLECMD, action: IA.SELECT_SPELL_SET, index: rnd(m.spell_sets.length) };
-        if (m.activates?.length && Math.random() < 0.4) return { type: RT.SELECT_IDLECMD, action: IA.SELECT_ACTIVATE, index: rnd(m.activates.length) };
+        // Develop a board: Special Summon whenever possible (free advantage), then
+        // Normal Summon the strongest monster, use effects, lay backrow, and only
+        // set a monster / pass when there's nothing more productive to do.
+        if (m.special_summons?.length) return { type: RT.SELECT_IDLECMD, action: IA.SELECT_SPECIAL_SUMMON, index: strongestIdx(m.special_summons) };
+        if (m.summons?.length) return { type: RT.SELECT_IDLECMD, action: IA.SELECT_SUMMON, index: strongestIdx(m.summons) };
+        if (m.activates?.length && Math.random() < 0.85) return { type: RT.SELECT_IDLECMD, action: IA.SELECT_ACTIVATE, index: rnd(m.activates.length) };
+        if (m.spell_sets?.length && Math.random() < 0.7) return { type: RT.SELECT_IDLECMD, action: IA.SELECT_SPELL_SET, index: rnd(m.spell_sets.length) };
+        if (m.pos_changes?.length && Math.random() < 0.3) return { type: RT.SELECT_IDLECMD, action: IA.SELECT_POS_CHANGE, index: rnd(m.pos_changes.length) };
+        if (m.monster_sets?.length && Math.random() < 0.5) return { type: RT.SELECT_IDLECMD, action: IA.SELECT_MONSTER_SET, index: strongestIdx(m.monster_sets) };
         if (m.to_bp) return { type: RT.SELECT_IDLECMD, action: IA.TO_BP, index: null };
         return { type: RT.SELECT_IDLECMD, action: IA.TO_EP, index: null };
       }
       case MT.SELECT_BATTLECMD:
-        if (m.attacks?.length) return { type: RT.SELECT_BATTLECMD, action: BA.SELECT_BATTLE, index: rnd(m.attacks.length) };
+        // Attack: prefer a direct swing, otherwise lead with the strongest attacker.
+        if (m.attacks?.length) {
+          const direct = m.attacks.findIndex((a) => a.can_direct);
+          return { type: RT.SELECT_BATTLECMD, action: BA.SELECT_BATTLE, index: direct >= 0 ? direct : strongestIdx(m.attacks) };
+        }
         return { type: RT.SELECT_BATTLECMD, action: m.to_ep ? BA.TO_EP : BA.TO_M2, index: null };
       case MT.SELECT_CARD: case MT.SELECT_TRIBUTE: return { type: m.type === MT.SELECT_TRIBUTE ? RT.SELECT_TRIBUTE : RT.SELECT_CARD, indicies: Array.from({ length: m.min }, (_, i) => i) };
       case MT.SELECT_CHAIN: return { type: RT.SELECT_CHAIN, index: m.forced ? 0 : null };
@@ -2732,14 +2748,24 @@ function EngineDuel({ main, extra }) {
     switch (p.type) {
       case MT.SELECT_IDLECMD: return { title: "Main Phase — your move", hint: "Summon or set a monster, set/activate a Spell or Trap, or end your turn." };
       case MT.SELECT_BATTLECMD: return { title: "Battle Phase", hint: "Declare an attack, or advance to Main Phase 2 / End Turn." };
-      case MT.SELECT_CHAIN: return { title: p.forced ? "Mandatory response" : "Response window", hint: p.forced ? "You must activate one of these effects." : "You may chain an effect in response — or pass." };
+      case MT.SELECT_CHAIN: return { title: p.forced ? "⚡ Mandatory response" : "⚡ Response window", hint: p.forced ? "You must activate one of these effects now." : "You may chain a Quick effect / Trap / hand trap in response — or pass.", window: true };
       case MT.SELECT_EFFECTYN: return { title: "Activate this effect?", hint: "Choose whether to apply the card's optional effect." };
       case MT.SELECT_YESNO: return { title: "Yes or No", hint: "Answer the card's question." };
       case MT.SELECT_OPTION: return { title: "Choose an effect", hint: "This card offers more than one effect — pick which to use." };
       case MT.SELECT_CARD: return { title: "Select target(s)", hint: `Pick ${p.min}${p.max > p.min ? `–${p.max}` : ""} card${p.max > 1 ? "s" : ""}. These are your targets or the cards to act on.` };
       case MT.SELECT_TRIBUTE: return { title: "Select tribute(s)", hint: `Choose ${p.min}${p.max > p.min ? `–${p.max}` : ""} monster(s) to Tribute.` };
       case MT.SELECT_POSITION: return { title: "Battle position", hint: "Choose the position to place this card." };
-      case MT.SELECT_PLACE: case MT.SELECT_DISFIELD: return { title: "Choose a zone", hint: `Pick where to place ${(p.count || 1) > 1 ? `${p.count} cards` : "the card"}.` };
+      case MT.SELECT_PLACE: return { title: "Choose a zone", hint: `Pick where to place ${(p.count || 1) > 1 ? `${p.count} cards` : "the card"}.` };
+      case MT.SELECT_DISFIELD: return { title: "Choose a zone to disable", hint: `Pick ${(p.count || 1) > 1 ? `${p.count} zones` : "a zone"} to lock.` };
+      case MT.SELECT_UNSELECT_CARD: return { title: "Select target(s)", hint: `Click cards to add or remove them (${p.min}${p.max > p.min ? `–${p.max}` : ""}); confirm when done.` };
+      case MT.SELECT_SUM: return { title: "Select material / tribute", hint: `Choose cards totalling ${p.amount}. Required cards are already counted.` };
+      case MT.SELECT_COUNTER: return { title: "Remove counters", hint: `Remove ${p.count} counter(s) — choose how many from each card.` };
+      case MT.SORT_CARD: case MT.SORT_CHAIN: return { title: "Set the order", hint: "Arrange these cards in the order you want (top first)." };
+      case MT.ANNOUNCE_ATTRIB: return { title: "Declare attribute(s)", hint: `Choose ${p.count} attribute${p.count > 1 ? "s" : ""}.` };
+      case MT.ANNOUNCE_RACE: return { title: "Declare type(s)", hint: `Choose ${p.count} monster type${p.count > 1 ? "s" : ""}.` };
+      case MT.ANNOUNCE_NUMBER: return { title: "Declare a number", hint: "Pick one of the offered values." };
+      case MT.ANNOUNCE_CARD: return { title: "Declare a card", hint: "Search and name a card." };
+      case MT.ROCK_PAPER_SCISSORS: return { title: "Rock–Paper–Scissors", hint: "Throw to decide who goes first." };
       default: return { title: "Your decision", hint: "" };
     }
   };
@@ -2762,16 +2788,90 @@ function EngineDuel({ main, extra }) {
     respond(autoResponse(prompt, m.OcgResponseType, m.SelectIdleCMDAction, m.SelectBattleCMDAction, m.OcgMessageType));
   };
 
+  // ---- click-on-card interaction (Dueling-Nexus style) -----------------
+  // search the engine DB by card name — used to declare a card (ANNOUNCE_CARD)
+  const searchCardsByName = (q) => {
+    if (!q || q.trim().length < 2 || !db.current) return [];
+    try {
+      const safe = q.trim().replace(/'/g, "''");
+      const r = db.current.exec(`SELECT id,name FROM texts WHERE name LIKE '%${safe}%' LIMIT 40`);
+      return (r?.[0]?.values || []).map(([id, name]) => ({ code: Number(id), name }));
+    } catch { return []; }
+  };
+  const sameLoc = (e, loc) => e && loc && e.controller === loc.controller && e.location === loc.location && e.sequence === loc.sequence;
+  const findLoc = (arr, loc) => (arr || []).findIndex((e) => sameLoc(e, loc));
+  // is the card at `loc` something the human can act on / select under the current prompt?
+  const cardActionState = (loc) => {
+    const p = prompt, m = mod.current;
+    if (!p || !m || !loc) return null;
+    const MT = m.OcgMessageType;
+    if (p.type === MT.SELECT_IDLECMD)
+      return [p.summons, p.special_summons, p.monster_sets, p.spell_sets, p.activates, p.pos_changes].some((a) => findLoc(a, loc) >= 0) ? { selectable: true } : null;
+    if (p.type === MT.SELECT_BATTLECMD)
+      return (findLoc(p.attacks, loc) >= 0 || findLoc(p.chains, loc) >= 0) ? { selectable: true } : null;
+    if (p.type === MT.SELECT_CARD || p.type === MT.SELECT_TRIBUTE) {
+      const i = findLoc(p.selects, loc);
+      return i < 0 ? null : { selectable: true, selected: pick.includes(i) };
+    }
+    if (p.type === MT.SELECT_UNSELECT_CARD) {
+      if (findLoc(p.select_cards, loc) >= 0) return { selectable: true };
+      if (findLoc(p.unselect_cards, loc) >= 0) return { selectable: true, selected: true };
+    }
+    return null;
+  };
+  // a click on a board/hand card → resolve it to the matching engine action(s)
+  const zoneClick = (loc, code) => {
+    const p = prompt, m = mod.current;
+    if (!p || !m || !loc) return;
+    const RT = m.OcgResponseType, IA = m.SelectIdleCMDAction, BA = m.SelectBattleCMDAction, MT = m.OcgMessageType;
+    if (p.type === MT.SELECT_IDLECMD) {
+      const actions = [];
+      const add = (arr, action, label, tone) => { const i = findLoc(arr, loc); if (i >= 0) actions.push({ label, resp: { type: RT.SELECT_IDLECMD, action, index: i }, tone }); };
+      add(p.summons, IA.SELECT_SUMMON, "Normal Summon", "good");
+      add(p.special_summons, IA.SELECT_SPECIAL_SUMMON, "Special Summon", "good");
+      add(p.monster_sets, IA.SELECT_MONSTER_SET, "Set (face-down)", null);
+      add(p.spell_sets, IA.SELECT_SPELL_SET, "Set", null);
+      add(p.activates, IA.SELECT_ACTIVATE, "Activate effect", "gold");
+      add(p.pos_changes, IA.SELECT_POS_CHANGE, "Change position", null);
+      if (actions.length === 1) respond(actions[0].resp);
+      else if (actions.length > 1) setCardMenu({ code, actions });
+      return;
+    }
+    if (p.type === MT.SELECT_BATTLECMD) {
+      const actions = [];
+      const ai = findLoc(p.attacks, loc); if (ai >= 0) actions.push({ label: `Attack${p.attacks[ai].can_direct ? " (direct OK)" : ""}`, resp: { type: RT.SELECT_BATTLECMD, action: BA.SELECT_BATTLE, index: ai }, tone: "good" });
+      const ci = findLoc(p.chains, loc); if (ci >= 0) actions.push({ label: "Activate effect", resp: { type: RT.SELECT_BATTLECMD, action: BA.SELECT_CHAIN, index: ci }, tone: "gold" });
+      if (actions.length === 1) respond(actions[0].resp);
+      else if (actions.length > 1) setCardMenu({ code, actions });
+      return;
+    }
+    if (p.type === MT.SELECT_CARD || p.type === MT.SELECT_TRIBUTE) {
+      const i = findLoc(p.selects, loc); if (i < 0) return;
+      setPick((pk) => pk.includes(i) ? pk.filter((x) => x !== i) : (pk.length < p.max ? [...pk, i] : pk));
+      return;
+    }
+    if (p.type === MT.SELECT_UNSELECT_CARD) {
+      const si = findLoc(p.select_cards, loc); if (si >= 0) { respond({ type: RT.SELECT_UNSELECT_CARD, index: si }); return; }
+      const ui = findLoc(p.unselect_cards, loc); if (ui >= 0) { respond({ type: RT.SELECT_UNSELECT_CARD, index: (p.select_cards?.length || 0) + ui }); }
+    }
+  };
+  // decisions with bespoke UI (rendered by <ComplexPrompt>) rather than a button list
+  const isComplex = (p) => {
+    if (!p || !mod.current) return false;
+    const MT = mod.current.OcgMessageType;
+    return [MT.SELECT_UNSELECT_CARD, MT.SELECT_SUM, MT.SELECT_COUNTER, MT.SORT_CARD, MT.SORT_CHAIN,
+      MT.ANNOUNCE_RACE, MT.ANNOUNCE_ATTRIB, MT.ANNOUNCE_NUMBER, MT.ANNOUNCE_CARD, MT.ROCK_PAPER_SCISSORS].includes(p.type);
+  };
+
   const drive = async () => {
     const c = core.current, h = handle.current, m = mod.current;
     const MT = m.OcgMessageType, PR = m.OcgProcessResult, RT = m.OcgResponseType, IA = m.SelectIdleCMDAction, BA = m.SelectBattleCMDAction;
-    // selections we resolve automatically for the human (no meaningful choice / no UI yet)
-    const AUTO = [
-      MT.SELECT_SUM, MT.SELECT_UNSELECT_CARD, MT.SELECT_COUNTER, MT.SELECT_CARD_CODES,
-      MT.SELECT_DISFIELD, MT.SORT_CARD, MT.SORT_CHAIN,
-      MT.ANNOUNCE_RACE, MT.ANNOUNCE_ATTRIB, MT.ANNOUNCE_CARD, MT.ANNOUNCE_NUMBER,
-      MT.ROCK_PAPER_SCISSORS,
-    ];
+    // Nothing is silently auto-resolved for the human anymore: every awaitable
+    // query now has a real player-facing prompt (SELECT_SUM / SELECT_UNSELECT /
+    // SELECT_COUNTER / SORT / ANNOUNCE_* / ROCK_PAPER_SCISSORS live in
+    // <ComplexPrompt>; SELECT_DISFIELD uses the zone picker). The "⚡ Let the
+    // engine choose" button on each prompt is the opt-in escape hatch.
+    const AUTO = [];
     const PHNAME = { 0x01: "Draw", 0x02: "Standby", 0x04: "Main 1", 0x08: "Battle Start", 0x10: "Battle Step", 0x20: "Damage", 0x40: "Damage Calc", 0x80: "Battle", 0x100: "Main 2", 0x200: "End" };
     let guard = 0, autoStreak = 0;
     while (guard++ < 8000) {
@@ -2809,7 +2909,7 @@ function EngineDuel({ main, extra }) {
         if (sel.player !== 0) { c.duelSetResponse(h, oppResponse(sel, RT, IA, BA, MT)); lastSel.current = null; if (++autoStreak > 600) { logLine("⚠ opponent stalled — stopping"); return; } await sleep(260); continue; } // AI opponent, paced
         if (AUTO.includes(sel.type)) { logLine("⚙ auto-resolved for you: " + (((m.ocgMessageTypeStrings?.get?.(sel.type)) || ("msg#" + sel.type)).toLowerCase().replace(/select_/, "").replace(/_/g, " ")) + " (cost / selection handled automatically)"); c.duelSetResponse(h, autoResponse(sel, RT, IA, BA, MT)); lastSel.current = null; if (++autoStreak > 600) { logLine("⚠ engine stalled on a selection — stopping"); return; } continue; }
         autoStreak = 0;
-        setPick([]); setPlaceSel([]); setPrompt(sel); return; // a real decision → hand off to the human
+        setPick([]); setPlaceSel([]); setCardMenu(null); setPromptId((v) => v + 1); setPrompt(sel); return; // a real decision → hand off to the human
       }
       autoStreak = 0;
       if (shown) await sleep(summonCode ? 900 : 150); // let animations / the summon spotlight breathe
@@ -3075,24 +3175,35 @@ function EngineDuel({ main, extra }) {
     const w = size, h = Math.round(size / 0.686);
     const showBack = !hand && card && (faceDown || (card.position & 10)); // FACEDOWN only on the field, never your hand
     const def = !hand && card && (card.position & 4);
+    const act = card && card.__loc ? cardActionState(card.__loc) : null;
+    const clickable = !!act?.selectable;
+    const chosen = !!act?.selected;
+    const onClick = clickable ? () => { Sound.sfx("click"); zoneClick(card.__loc, card.code); } : undefined;
+    // gold ring = actionable now; solid gold + check = currently selected
+    const ring = chosen ? `0 0 0 3px ${C.gold}, 0 0 14px 2px ${hexA(C.gold, .7)}`
+      : clickable ? `0 0 0 2px ${hexA(C.gold, .85)}, 0 0 12px 1px ${hexA(C.gold, .45)}`
+      : null;
     if (hand) {
       return (
-        <div title={card ? nameOf(card.code) : undefined} style={{ width: w, height: h, borderRadius: 5, overflow: "hidden", flexShrink: 0, boxShadow: "0 4px 12px rgba(0,0,0,.5)", background: C.panel2 }}>
+        <div title={card ? nameOf(card.code) : undefined} onClick={onClick}
+          style={{ width: w, height: h, borderRadius: 5, overflow: "hidden", flexShrink: 0, boxShadow: ring || "0 4px 12px rgba(0,0,0,.5)", background: C.panel2, cursor: clickable ? "pointer" : "default", transform: clickable ? "translateY(-6px)" : "none", transition: "transform .12s ease, box-shadow .12s ease", position: "relative" }}>
           {card && <CardImg id={card.code} variant="small" name={nameOf(card.code)} style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
+          {chosen && <div style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: "50%", background: C.gold, color: "#1a1206", fontSize: 11, fontWeight: 900, display: "grid", placeItems: "center" }}>✓</div>}
         </div>
       );
     }
     return (
-      <div title={card && !showBack ? nameOf(card.code) : undefined}
-        style={{ width: w + 16, height: w + 16, position: "relative", flexShrink: 0, display: "grid", placeItems: "center" }}>
+      <div title={card && !showBack ? nameOf(card.code) : undefined} onClick={onClick}
+        style={{ width: w + 16, height: w + 16, position: "relative", flexShrink: 0, display: "grid", placeItems: "center", cursor: clickable ? "pointer" : "default" }}>
         {/* the stone pad */}
         <div className="octpad stonepad" style={{ position: "absolute", inset: 0, opacity: card ? 0.95 : 0.85 }} />
         {/* the card on the pad */}
         {card && (
-          <div key={card.code} className="dcard" style={{ position: "relative", zIndex: 2, width: Math.round(w * 0.74), height: Math.round((w * 0.74) / 0.686), borderRadius: 3, overflow: "hidden", transform: def ? "rotate(90deg) scale(.92)" : "none", boxShadow: "0 3px 10px rgba(0,0,0,.55)", background: C.panel2 }}>
+          <div key={card.code} className="dcard" style={{ position: "relative", zIndex: 2, width: Math.round(w * 0.74), height: Math.round((w * 0.74) / 0.686), borderRadius: 3, overflow: "hidden", transform: def ? "rotate(90deg) scale(.92)" : (clickable ? "scale(1.06)" : "none"), boxShadow: ring || "0 3px 10px rgba(0,0,0,.55)", background: C.panel2, transition: "transform .12s ease, box-shadow .12s ease" }}>
             {showBack
               ? <div style={{ width: "100%", height: "100%", background: `repeating-linear-gradient(45deg,#6e3f16 0 4px,#3c2008 4px 8px)`, display: "grid", placeItems: "center" }}><div style={{ width: "42%", height: "42%", transform: "rotate(45deg)", background: "radial-gradient(circle at 40% 35%, #caa24a, #7a5a18)", borderRadius: 3 }} /></div>
               : <CardImg id={card.code} variant="small" name={nameOf(card.code)} style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
+            {chosen && <div style={{ position: "absolute", inset: 0, background: hexA(C.gold, .22), display: "grid", placeItems: "center" }}><span style={{ fontSize: 20, color: C.gold, textShadow: "0 1px 3px #000" }}>✓</span></div>}
           </div>
         )}
         {/* MD-style ★level + ATK/DEF plate below (above for the opponent) */}
@@ -3117,6 +3228,27 @@ function EngineDuel({ main, extra }) {
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", height: "calc(100vh - 60px)" }}>
+      {/* floating card-action menu — appears when a clicked card offers >1 action */}
+      {cardMenu && (
+        <div onClick={() => setCardMenu(null)} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(4,6,10,.55)", display: "grid", placeItems: "center" }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: C.panel2, border: `1px solid ${C.gold}`, borderRadius: 12, padding: 16, width: 320, boxShadow: "0 12px 40px rgba(0,0,0,.6)" }}>
+            <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
+              <CardImg id={cardMenu.code} variant="small" name={nameOf(cardMenu.code)} style={{ width: 52, height: 76, borderRadius: 4, objectFit: "cover", flexShrink: 0 }} />
+              <div>
+                <div className="disp" style={{ fontSize: 13, color: C.gold }}>{nameOf(cardMenu.code)}</div>
+                <div className="mono" style={{ fontSize: 10.5, color: C.mute, marginTop: 2 }}>Choose an action</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {cardMenu.actions.map((a, i) => (
+                <button key={i} onClick={() => { const r = a.resp; setCardMenu(null); respond(r); }}
+                  style={{ textAlign: "left", background: C.panel, border: `1px solid ${a.tone === "good" ? C.good : a.tone === "gold" ? C.gold : C.line}`, color: a.tone === "good" ? C.good : a.tone === "gold" ? C.gold : C.text, borderRadius: 7, padding: "9px 12px", fontSize: 12.5 }}>{a.label}</button>
+              ))}
+              <button onClick={() => setCardMenu(null)} style={{ ...btn(), color: C.mute, fontSize: 11, marginTop: 2 }}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
       <div style={{ padding: 10, display: "flex", flexDirection: "column", justifyContent: "flex-start", overflow: "auto", minHeight: 0, background: "#0b0d10" }}>
         <div className={"mdArena" + (shaking ? " shake" : "")} style={{ maxWidth: 980, width: "100%", margin: "0 auto", padding: "16px 44px 18px" }}>
           {flare && <div key={flare.n} className={"flarelayer " + (flare.kind === "red" ? "flare-red" : "flare-gold")} />}
@@ -3251,9 +3383,9 @@ function EngineDuel({ main, extra }) {
           {(() => {
             const meta = prompt ? promptMeta(prompt) : null;
             return (
-              <div style={{ marginBottom: 10 }}>
+              <div className={meta?.window ? "turnbanner" : undefined} style={{ marginBottom: 10, ...(meta?.window ? { border: `1px solid ${C.gold}`, background: hexA(C.gold, .1), borderRadius: 8, padding: "8px 10px", boxShadow: `0 0 14px ${hexA(C.gold, .3)}` } : null) }}>
                 <div className="disp" style={{ fontSize: 12.5, color: prompt ? C.gold : C.mute, letterSpacing: ".05em" }}>
-                  {status === "ended" ? "Duel over" : meta ? `▶ ${meta.title}` : "Engine resolving…"}
+                  {status === "ended" ? "Duel over" : meta ? `${meta.window ? "" : "▶ "}${meta.title}` : "Engine resolving…"}
                 </div>
                 {meta && meta.hint && <div className="mono" style={{ fontSize: 11, color: C.text, marginTop: 5, lineHeight: 1.45, opacity: .85 }}>{meta.hint}</div>}
                 {!prompt && status !== "ended" && <div className="mono" style={{ fontSize: 10.5, color: C.mute, marginTop: 4 }}>Resolving effects — no input needed.</div>}
@@ -3263,7 +3395,7 @@ function EngineDuel({ main, extra }) {
           {status === "ended" && <button onClick={start} className="disp" style={{ ...btn(), background: C.gold, color: "#1a1206", border: "none" }}>New duel</button>}
           {prompt && isMultiSel(prompt) && (
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-              <p className="mono" style={{ fontSize: 11, color: C.gold }}>Select {prompt.min}{prompt.max > prompt.min ? `–${prompt.max}` : ""} card{prompt.max > 1 ? "s" : ""}:</p>
+              <p className="mono" style={{ fontSize: 11, color: C.gold }}>Select {prompt.min}{prompt.max > prompt.min ? `–${prompt.max}` : ""} card{prompt.max > 1 ? "s" : ""} — click here or the highlighted cards on the field:</p>
               {(prompt.selects || []).map((c, i) => {
                 const on = pick.includes(i);
                 return (
@@ -3305,7 +3437,11 @@ function EngineDuel({ main, extra }) {
               </div>
             );
           })()}
-          {prompt && !isMultiSel(prompt) && !isPlace(prompt) && (
+          {prompt && isComplex(prompt) && (
+            <ComplexPrompt key={promptId} p={prompt} M={mod.current} nameOf={nameOf} searchCards={searchCardsByName}
+              respond={respond} autoResolve={autoResolveCurrent} />
+          )}
+          {prompt && !isMultiSel(prompt) && !isPlace(prompt) && !isComplex(prompt) && (
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
               {btns.length === 0 && <p className="mono" style={{ fontSize: 11, color: C.mute }}>(no options — the engine may be mid-resolution)</p>}
               {btns.map((x, i) => (
@@ -3356,6 +3492,168 @@ function EngineDuel({ main, extra }) {
       </div>
     </div>
   );
+}
+
+/* attribute / monster-type bit tables for ANNOUNCE_ATTRIB / ANNOUNCE_RACE */
+const ATTRIB_BITS = [[1, "EARTH"], [2, "WATER"], [4, "FIRE"], [8, "WIND"], [16, "LIGHT"], [32, "DARK"], [64, "DIVINE"]];
+const RACE_BITS = [
+  [1, "Warrior"], [2, "Spellcaster"], [4, "Fairy"], [8, "Fiend"], [16, "Zombie"], [32, "Machine"],
+  [64, "Aqua"], [128, "Pyro"], [256, "Rock"], [512, "Winged Beast"], [1024, "Plant"], [2048, "Insect"],
+  [4096, "Thunder"], [8192, "Dragon"], [16384, "Beast"], [32768, "Beast-Warrior"], [65536, "Dinosaur"],
+  [131072, "Fish"], [262144, "Sea Serpent"], [524288, "Reptile"], [1048576, "Psychic"], [2097152, "Divine-Beast"],
+  [4194304, "Creator God"], [8388608, "Wyrm"], [16777216, "Cyberse"], [33554432, "Illusion"],
+];
+
+/* ====================================================================== */
+/*  COMPLEX PROMPT — real UI for the decisions that were silently          */
+/*  auto-resolved before (materials, counters, declarations, sort, RPS).   */
+/*  Keyed by promptId so each new engine query mounts with fresh state.     */
+/* ====================================================================== */
+function ComplexPrompt({ p, M, nameOf, searchCards, respond, autoResolve }) {
+  const MT = M.OcgMessageType, RT = M.OcgResponseType;
+  const [chosen, setChosen] = useState([]);   // SELECT_SUM → indices into p.selects · ANNOUNCE_* → bit values
+  const [counters, setCounters] = useState(() => (p.type === MT.SELECT_COUNTER ? (p.cards || []).map(() => 0) : []));
+  const [order, setOrder] = useState(() => ((p.type === MT.SORT_CARD || p.type === MT.SORT_CHAIN) ? (p.cards || []).map((_, i) => i) : []));
+  const [query, setQuery] = useState("");
+
+  const wrap = { display: "flex", flexDirection: "column", gap: 6 };
+  const rowBtn = (on) => ({ textAlign: "left", background: on ? "rgba(232,184,75,.15)" : C.panel2, border: `1px solid ${on ? C.gold : C.line}`, color: on ? C.gold : C.text, borderRadius: 6, padding: "7px 10px", fontSize: 12 });
+  const confirmStyle = (ok) => ({ ...btn(), marginTop: 4, background: ok ? C.good : C.panel2, color: ok ? "#07120b" : C.mute, border: "none" });
+  const escape = <button onClick={autoResolve} style={{ ...btn(), color: C.mute, fontSize: 11 }}>⚡ Let the engine choose</button>;
+
+  // SELECT_UNSELECT_CARD — iterative add/remove targeting (engine re-prompts each pick)
+  if (p.type === MT.SELECT_UNSELECT_CARD) {
+    const selN = (p.select_cards || []).length;
+    return (
+      <div style={wrap}>
+        {(p.unselect_cards || []).length > 0 && <p className="mono" style={{ fontSize: 10.5, color: C.mute }}>Selected (click to remove):</p>}
+        {(p.unselect_cards || []).map((c, j) => (
+          <button key={"u" + j} onClick={() => respond({ type: RT.SELECT_UNSELECT_CARD, index: selN + j })} style={rowBtn(true)}>✓ {nameOf(c.code)}</button>
+        ))}
+        {selN > 0 && <p className="mono" style={{ fontSize: 10.5, color: C.gold }}>Add ({p.min}{p.max > p.min ? `–${p.max}` : ""}):</p>}
+        {(p.select_cards || []).map((c, i) => (
+          <button key={"s" + i} onClick={() => respond({ type: RT.SELECT_UNSELECT_CARD, index: i })} style={rowBtn(false)}>{nameOf(c.code)}</button>
+        ))}
+        {p.can_finish && <button onClick={() => respond({ type: RT.SELECT_UNSELECT_CARD, index: null })} style={confirmStyle(true)}>Finish selection</button>}
+        {!p.can_finish && p.can_cancel && <button onClick={() => respond({ type: RT.SELECT_UNSELECT_CARD, index: null })} style={{ ...btn(), color: C.bad, borderColor: C.bad }}>Cancel</button>}
+        {escape}
+      </div>
+    );
+  }
+
+  // SELECT_SUM — materials/tributes that must total `amount` (mandatory cards pre-counted)
+  if (p.type === MT.SELECT_SUM) {
+    const must = p.selects_must || [], opt = p.selects || [];
+    const mustSum = must.reduce((s, c) => s + (c.amount || 0), 0);
+    const total = mustSum + chosen.reduce((s, i) => s + (opt[i]?.amount || 0), 0);
+    const ok = total >= p.amount;   // permissive — engine sends RETRY if the exact rule differs, and we re-prompt
+    return (
+      <div style={wrap}>
+        <p className="mono" style={{ fontSize: 11, color: ok ? C.good : C.gold }}>Total {total} / need {p.amount}</p>
+        {must.map((c, i) => <div key={"m" + i} style={{ ...rowBtn(true), opacity: .8 }}>🔒 {nameOf(c.code)} · {c.amount}</div>)}
+        {opt.map((c, i) => { const on = chosen.includes(i); return <button key={"o" + i} onClick={() => setChosen((s) => s.includes(i) ? s.filter((x) => x !== i) : [...s, i])} style={rowBtn(on)}>{on ? "✓ " : ""}{nameOf(c.code)} · {c.amount}</button>; })}
+        <button disabled={!ok} onClick={() => respond({ type: RT.SELECT_SUM, indicies: chosen })} style={confirmStyle(ok)}>Confirm</button>
+        {escape}
+      </div>
+    );
+  }
+
+  // SELECT_COUNTER — distribute how many counters to remove from each card
+  if (p.type === MT.SELECT_COUNTER) {
+    const cards = p.cards || [];
+    const sum = counters.reduce((a, b) => a + b, 0), ok = sum === p.count;
+    const setAt = (i, v) => setCounters((s) => s.map((x, j) => (j === i ? Math.max(0, Math.min(cards[i].count || 0, v)) : x)));
+    return (
+      <div style={wrap}>
+        <p className="mono" style={{ fontSize: 11, color: ok ? C.good : C.gold }}>Removing {sum} / {p.count}</p>
+        {cards.map((c, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, padding: "6px 8px" }}>
+            <span style={{ flex: 1, fontSize: 12 }}>{nameOf(c.code)} <span className="mono" style={{ color: C.mute, fontSize: 10 }}>(max {c.count})</span></span>
+            <button onClick={() => setAt(i, counters[i] - 1)} style={miniBtn()}>−</button>
+            <span className="mono" style={{ width: 18, textAlign: "center" }}>{counters[i]}</span>
+            <button onClick={() => setAt(i, counters[i] + 1)} style={miniBtn()}>+</button>
+          </div>
+        ))}
+        <button disabled={!ok} onClick={() => respond({ type: RT.SELECT_COUNTER, counters })} style={confirmStyle(ok)}>Confirm</button>
+        {escape}
+      </div>
+    );
+  }
+
+  // SORT_CARD / SORT_CHAIN — arrange order (top first)
+  if (p.type === MT.SORT_CARD || p.type === MT.SORT_CHAIN) {
+    const cards = p.cards || [];
+    const move = (idx, d) => setOrder((o) => { const n = [...o], j = idx + d; if (j < 0 || j >= n.length) return o; [n[idx], n[j]] = [n[j], n[idx]]; return n; });
+    return (
+      <div style={wrap}>
+        {order.map((ci, pos) => (
+          <div key={ci} style={{ display: "flex", alignItems: "center", gap: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, padding: "6px 8px" }}>
+            <span className="mono" style={{ color: C.gold, width: 16 }}>{pos + 1}</span>
+            <span style={{ flex: 1, fontSize: 12 }}>{nameOf(cards[ci].code)}</span>
+            <button onClick={() => move(pos, -1)} style={miniBtn()}>▲</button>
+            <button onClick={() => move(pos, 1)} style={miniBtn()}>▼</button>
+          </div>
+        ))}
+        <button onClick={() => respond({ type: RT.SORT_CARD, order })} style={confirmStyle(true)}>Confirm order</button>
+        {escape}
+      </div>
+    );
+  }
+
+  // ANNOUNCE_ATTRIB / ANNOUNCE_RACE — declare N bits from the available mask
+  if (p.type === MT.ANNOUNCE_ATTRIB || p.type === MT.ANNOUNCE_RACE) {
+    const isAttr = p.type === MT.ANNOUNCE_ATTRIB;
+    const avail = BigInt(p.available ?? 0);
+    const list = (isAttr ? ATTRIB_BITS : RACE_BITS).filter(([bit]) => (avail & BigInt(bit)) !== 0n);
+    const need = p.count || 1, ok = chosen.length === need;
+    const toggle = (bit) => setChosen((s) => s.includes(bit) ? s.filter((x) => x !== bit) : (s.length < need ? [...s, bit] : s));
+    return (
+      <div style={wrap}>
+        <p className="mono" style={{ fontSize: 11, color: ok ? C.good : C.gold }}>Choose {need}</p>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5 }}>
+          {list.map(([bit, label]) => { const on = chosen.includes(bit); return <button key={bit} onClick={() => toggle(bit)} style={rowBtn(on)}>{on ? "✓ " : ""}{label}</button>; })}
+        </div>
+        <button disabled={!ok} onClick={() => respond(isAttr ? { type: RT.ANNOUNCE_ATTRIB, attributes: chosen } : { type: RT.ANNOUNCE_RACE, races: chosen })} style={confirmStyle(ok)}>Confirm</button>
+        {escape}
+      </div>
+    );
+  }
+
+  // ANNOUNCE_NUMBER — pick one offered value (respond with its index)
+  if (p.type === MT.ANNOUNCE_NUMBER) {
+    return (
+      <div style={wrap}>
+        {(p.options || []).map((v, i) => <button key={i} onClick={() => respond({ type: RT.ANNOUNCE_NUMBER, value: i })} style={rowBtn(false)}>{String(v)}</button>)}
+        {escape}
+      </div>
+    );
+  }
+
+  // ANNOUNCE_CARD — declare a card by name (searched against the engine DB)
+  if (p.type === MT.ANNOUNCE_CARD) {
+    const results = searchCards(query);
+    return (
+      <div style={wrap}>
+        <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Type a card name…" style={{ ...inp(), background: C.panel2, color: C.text }} />
+        <div style={{ maxHeight: 220, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+          {results.map((r) => <button key={r.code} onClick={() => respond({ type: RT.ANNOUNCE_CARD, card: r.code })} style={rowBtn(false)}>{r.name}</button>)}
+          {query.trim().length >= 2 && !results.length && <p className="mono" style={{ fontSize: 11, color: C.mute }}>No matches.</p>}
+        </div>
+        {escape}
+      </div>
+    );
+  }
+
+  // ROCK_PAPER_SCISSORS
+  if (p.type === MT.ROCK_PAPER_SCISSORS) {
+    return (
+      <div style={wrap}>
+        {[[1, "✊ Rock"], [2, "✋ Paper"], [3, "✌ Scissors"]].map(([v, label]) => <button key={v} onClick={() => respond({ type: RT.ROCK_PAPER_SCISSORS, value: v })} style={rowBtn(false)}>{label}</button>)}
+      </div>
+    );
+  }
+
+  return <div style={wrap}><p className="mono" style={{ fontSize: 11, color: C.mute }}>Unsupported decision.</p>{escape}</div>;
 }
 
 /* ---- tiny ui atoms ---------------------------------------------------- */
